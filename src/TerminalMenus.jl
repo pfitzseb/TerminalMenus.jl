@@ -15,6 +15,8 @@ include("AbstractMenu.jl")
 include("RadioMenu.jl")
 include("MultiSelectMenu.jl")
 
+include("Tree.jl")
+
 export
     RadioMenu,
     MultiSelectMenu,
