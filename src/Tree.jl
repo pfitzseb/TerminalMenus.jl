@@ -6,7 +6,9 @@
 #      Child41
 #      Child42
 
-mutable struct Tree <: AbstractMenu
+abstract type AbstractTree <: AbstractMenu end
+
+mutable struct Tree <: AbstractTree
     head
     children::Vector{Any}
 
@@ -19,6 +21,14 @@ mutable struct Tree <: AbstractMenu
     selected
     lastHeight::Int
 end
+
+# mutable struct SubTree <: AbstractTree
+#     head
+#     children
+#
+#     expanded
+#     options
+# end
 
 function Tree(head, children)
     Tree(head, children, Set{Int}(), [], length(children), 0, nothing, 0)
@@ -57,7 +67,7 @@ end
 # This function must be implemented for all menu types. It should write
 #   the option at index `idx` to the buffer. If cursor is `true` it
 #   should also display the cursor
-function writeLine(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int)
+function writeLine(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int; indent::Int=0)
     tmpbuf = IOBuffer()
 
     child = t.children[idx]
@@ -67,18 +77,24 @@ function writeLine(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int)
             print(tmpbuf, cur ? "[v] " : " v  ")
             print(tmpbuf, child.head)
             print(tmpbuf, "\n\r")
-            printMenu(tmpbuf, child, 0, init=true, indent=2)
+            printMenu(tmpbuf, child, 0, init=true, indent=indent+2)
         else
             print(tmpbuf, cur ? "[>] " : " >  ")
             print(tmpbuf, child.head)
         end
     else
         print(tmpbuf, cur ? "[ ] " : "    ")
-        print(tmpbuf, child)
+        strs = split(sprint(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)), '\n')
+        if length(strs) > 1
+            printMenu(tmpbuf, Tree(strs[1], [join(strs, "\n")]), 0, init=true, indent=indent+2)
+        else
+            print(tmpbuf, strs[1])
+        end
     end
 
     print(buf, String(take!(tmpbuf)))
 end
+
 
 # OPTIONAL FUNCTIONS
 # These functions do not need to be implemented for all Menu types
@@ -125,7 +141,7 @@ function printMenu(out, m::Tree, cursor::Int; init::Bool=false, indent=0)
         term_width = Base.Terminals.width(TerminalMenus.terminal)
 
         print(buf, " "^indent)
-        writeLine(buf, m, i, i == cursor, term_width)
+        writeLine(buf, m, i, i == cursor, term_width, indent=indent)
 
         # dont print an \r\n on the last line
         i != (m.pagesize+m.pageoffset) && print(buf, "\r\n")
