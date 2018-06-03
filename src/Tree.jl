@@ -12,7 +12,7 @@ mutable struct Tree <: AbstractTree
     head
     children::Vector{Any}
 
-    expanded::Set{Int}
+    expanded::Bool
     options::Vector{String}
 
     pagesize::Int
@@ -31,20 +31,31 @@ end
 # end
 
 function Tree(head, children)
-    Tree(head, children, Set{Int}(), [], length(children), 0, nothing, 0)
+    Tree(head, children, false, [], length(children), 0, nothing, 0)
+end
+
+toggle(t::Tree) = (t.expanded = !t.expanded)
+
+showmethod(T) = which(show, (IO, T))
+
+getfield′(x, f) = isdefined(x, f) ? getfield(x, f) : Text("#undef")
+
+function defaultrepr(x)
+    fields = fieldnames(typeof(x))
+    if isempty(fields)
+        Text(string(typeof(x), "()"))
+    else
+        Tree(Text(string(typeof(x))),
+                 [Tree(Text("$f → "), getfield′(x, f)) for f in fields])
+    end
 end
 
 # This function must be implemented for all menu types. It defines what
 #   happens when a user presses the Enter key while the menu is open.
 # If this function returns true, `request()` will exit.
 function pick(t::Tree, cursor::Int)
-    if cursor in t.expanded
-        delete!(t.expanded, cursor)
-        # delete!(t.selected, cursor)
-    else
-        push!(t.expanded, cursor)
-        # push!(t.selected, cursor)
-    end
+    child = t.children[cursor]
+    child isa Tree && toggle(child)
 
     return false
 end
@@ -56,7 +67,7 @@ end
 # This function must be implemented for all menu types. It defines what
 #   happends when a user cancels ('q' or ctrl-c) a menu. `request()` will
 #   always exit after calling this function.
-cancel(t::Tree) = empty!(t.expanded)
+cancel(t::Tree) = nothing
 
 # This function must be implemented for all menu types. It should return
 #   a list of strings to be displayed as options in the current page.
@@ -64,34 +75,46 @@ function options(t::Tree)
     fill("", length(t.children))
 end
 
-# This function must be implemented for all menu types. It should write
-#   the option at index `idx` to the buffer. If cursor is `true` it
-#   should also display the cursor
-function writeLine(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int; indent::Int=0)
+const INDENTSIZE = 2
+
+printIndent(buf::IOBuffer, level) = print(buf, " "^(level*INDENTSIZE))
+
+function printTreeChild(buf::IOBuffer, child::Tree, cur::Bool, term_width::Int; level::Int = 0)
+    if child.expanded
+        cur ? print(buf, "[v] ") : print(buf, " v  ")
+        # print Tree with additional nesting, but without an active cursor
+        # init=true assures that the Tree printing doesn't mess with anything
+        printMenu(buf, child, 0; init=true, level = level + 1)
+    else
+        cur ? print(buf, "[>] ") : print(buf, " >  ")
+        # only print header
+        print(buf, child.head)
+    end
+end
+
+function writeChild(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int; level::Int = 0)
     tmpbuf = IOBuffer()
 
     child = t.children[idx]
 
     if child isa Tree
-        if idx in t.expanded
-            print(tmpbuf, cur ? "[v] " : " v  ")
-            print(tmpbuf, child.head)
-            print(tmpbuf, "\n\r")
-            printMenu(tmpbuf, child, 0, init=true, indent=indent+2)
-        else
-            print(tmpbuf, cur ? "[>] " : " >  ")
-            print(tmpbuf, child.head)
-        end
+        printTreeChild(tmpbuf, child, cur, term_width, level = level)
     else
-        print(tmpbuf, cur ? "[ ] " : "    ")
-        strs = split(sprint(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)), '\n')
-        if length(strs) > 1
-            printMenu(tmpbuf, Tree(strs[1], [join(strs, "\n")]), 0, init=true, indent=indent+2)
+        # if there's a specially designed show method we fall back to that
+        if showmethod(typeof(child)) ≠ showmethod(Any)
+            cur ? print(buf, "[ ] ") : print(buf, "    ")
+            printIndent(tmpbuf, level)
+            print(tmpbuf, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)))
         else
-            print(tmpbuf, strs[1])
+            d = defaultrepr(child)
+            if d isa Tree
+                printTreeChild(tmpbuf, d, cur, term_width, level = level)
+            else
+                printIndent(tmpbuf, level)
+                print(tmpbuf, d)
+            end
         end
     end
-
     print(buf, String(take!(tmpbuf)))
 end
 
@@ -110,7 +133,7 @@ header(t::Tree) = t.head
 #   true, `request()` will exit.
 keypress(m::AbstractMenu, i::UInt32) = false
 
-function printMenu(out, m::Tree, cursor::Int; init::Bool=false, indent=0)
+function printMenu(out, m::Tree, cursor::Int; init::Bool=false, level=0)
     CONFIG[:supress_output] && return
 
     buf = IOBuffer()
@@ -123,7 +146,7 @@ function printMenu(out, m::Tree, cursor::Int; init::Bool=false, indent=0)
         # clear display until end of screen
         print(buf, "\x1b[0J")
     end
-
+    print(buf, m.head)
     for i in (m.pageoffset+1):(m.pageoffset + m.pagesize)
         print(buf, "\x1b[2K")
 
@@ -140,8 +163,8 @@ function printMenu(out, m::Tree, cursor::Int; init::Bool=false, indent=0)
 
         term_width = Base.Terminals.width(TerminalMenus.terminal)
 
-        print(buf, " "^indent)
-        writeLine(buf, m, i, i == cursor, term_width, indent=indent)
+
+        writeChild(buf, m, i, i == cursor, term_width, level=level)
 
         # dont print an \r\n on the last line
         i != (m.pagesize+m.pageoffset) && print(buf, "\r\n")
