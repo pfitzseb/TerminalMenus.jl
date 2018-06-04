@@ -1,10 +1,6 @@
-# > TypeFoo
-#    >  Child1
-#    >  Child2
-#   [>] Child3
-#    v  Child4
-#      Child41
-#      Child42
+# TODO: fix width limiting
+# TODO: introducing vertical scrolling so nothing breaks when the current Tree is
+#       higher than the terminal has lines
 
 export @ishow
 
@@ -95,15 +91,18 @@ indent(level) = "  "
 
 function printTreeChild(buf::IOBuffer, child::Tree, cursor, term_width::Int; level::Int = 0)
     cur = cursor == -1
+    symbol = length(child.children) > 0 ? child.expanded ? "▼" : "▶" : " "
+
+    cur ? print(buf, "[$symbol] ") : print(buf, " $symbol  ")
     if child.expanded
-        cur ? print(buf, "[▼] ") : print(buf, " ▼  ")
         # print Tree with additional nesting, but without an active cursor
         # init=true assures that the Tree printing doesn't mess with anything
         cursor = printMenu′(buf, child, cursor; init=true, level = level)
     else
-        cur ? print(buf, "[▶] ") : print(buf, " ▶  ")
         # only print header
-        print(buf, child.head)
+        tb = IOBuffer()
+        print(tb, child.head)
+        print(buf, join(limitLineLength([String(take!(tb))], term_width-(2*level + 10)), '\n'))
     end
 
     cursor
@@ -114,19 +113,34 @@ macro ishow(x)
 end
 
 function ishow(x)
-    t = if showmethod(typeof(x)) ≠ showmethod(Any)
-        b = IOBuffer()
-        print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), x)))
-        strs = split(String(take!(b)), '\n')
-        if length(strs) > 1
-            Tree(strs[1], [Text(join(strs[2:end], '\n'))])
+    # t = if showmethod(typeof(x)) ≠ showmethod(Any)
+    #     b = IOBuffer()
+    #     print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), x)))
+    #     strs = split(String(take!(b)), '\n')
+    #     if length(strs) > 1
+    #         Tree(strs[1], [Text(join(strs[2:end], '\n'))])
+    #     else
+    #         Tree(strs[1], [])
+    #     end
+    # else
+    #     defaultrepr(x)
+    # end
+    request(defaultrepr(x))
+end
+
+function limitLineLength(strs, term_width)
+    outstrs = String[]
+    for str in strs
+        if length(str) >= term_width
+            while length(str) >= term_width
+                push!(outstrs, str[1:term_width])
+                str = str[term_width:end]
+            end
         else
-            Tree(strs[1], [])
+            push!(outstrs, str)
         end
-    else
-        defaultrepr(x)
     end
-    request(t)
+    outstrs
 end
 
 function writeChild(buf::IOBuffer, t::Tree, idx::Int, cursor, term_width::Int; level::Int = 0)
@@ -144,7 +158,7 @@ function writeChild(buf::IOBuffer, t::Tree, idx::Int, cursor, term_width::Int; l
             cur ? print(buf, "[ ] ") : print(buf, "    ")
             b = IOBuffer()
             print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)))
-            s = join(split(String(take!(b)), '\n'), "\n"*indent(level))
+            s = join(limitLineLength(split(String(take!(b)), '\n'), term_width-(2*level + 10)), "\n"*indent(level))
             print(tmpbuf, s)
         else
             d = defaultrepr(child)
@@ -153,7 +167,7 @@ function writeChild(buf::IOBuffer, t::Tree, idx::Int, cursor, term_width::Int; l
             else
                 b = IOBuffer()
                 print(b, d)
-                s = join(split(String(take!(b)), '\n'), "\n"*indent(level))
+                s = join(limitLineLength(split(String(take!(b)), '\n'), term_width-(2*level + 10)), "\n"*indent(level))
                 print(tmpbuf, s)
             end
         end
@@ -200,7 +214,9 @@ function printMenu′(out, m::Tree, cursor; init::Bool=false, level=0)
     term_width = Base.Terminals.width(TerminalMenus.terminal)
 
     # print header
-    println(buf, m.head)
+    tb = IOBuffer()
+    print(tb, m.head)
+    println(buf, join(limitLineLength([String(take!(tb))], term_width-(2*level + 10)), '\n'))
 
     for i in 1:length(m.children)
         print(buf, "\x1b[2K")
