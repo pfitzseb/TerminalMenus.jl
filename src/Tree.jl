@@ -6,6 +6,8 @@
 #      Child41
 #      Child42
 
+export @ishow
+
 abstract type AbstractTree <: AbstractMenu end
 
 mutable struct Tree <: AbstractTree
@@ -20,6 +22,8 @@ mutable struct Tree <: AbstractTree
 
     selected
     lastHeight::Int
+
+    cursor
 end
 
 # mutable struct SubTree <: AbstractTree
@@ -31,7 +35,7 @@ end
 # end
 
 function Tree(head, children)
-    Tree(head, children, false, [], length(children), 0, nothing, 0)
+    Tree(head, children, false, [], length(children), 0, nothing, 0, 0)
 end
 
 toggle(t::Tree) = (t.expanded = !t.expanded)
@@ -40,22 +44,30 @@ showmethod(T) = which(show, (IO, T))
 
 getfield′(x, f) = isdefined(x, f) ? getfield(x, f) : Text("#undef")
 
-function defaultrepr(x)
-    fields = fieldnames(typeof(x))
-    if isempty(fields)
-        Text(string(typeof(x), "()"))
+function defaultrepr(x; smethod=false)
+    if smethod && showmethod(typeof(x)) ≠ showmethod(Any)
+        b = IOBuffer()
+        print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), x)))
+        Text(String(take!(b)))
     else
-        Tree(Text(string(typeof(x))),
-                 [Tree(Text("$f → "), getfield′(x, f)) for f in fields])
+        fields = fieldnames(typeof(x))
+
+        if isempty(fields)
+            Tree(string(typeof(x), "()"), [])
+        else
+            Tree(string(typeof(x)),
+                 [Tree(string(f), [defaultrepr(getfield′(x, f), smethod=true)]) for f in fields])
+        end
     end
 end
 
 # This function must be implemented for all menu types. It defines what
 #   happens when a user presses the Enter key while the menu is open.
 # If this function returns true, `request()` will exit.
-function pick(t::Tree, cursor::Int)
-    child = t.children[cursor]
-    child isa Tree && toggle(child)
+function pick(t::Tree, currentItem)
+    if currentItem isa Tree
+        toggle(currentItem)
+    end
 
     return false
 end
@@ -77,45 +89,83 @@ end
 
 const INDENTSIZE = 2
 
-printIndent(buf::IOBuffer, level) = print(buf, " "^(level*INDENTSIZE))
+printIndent(buf::IOBuffer, level) = print(buf, " "^(level))
 
-function printTreeChild(buf::IOBuffer, child::Tree, cur::Bool, term_width::Int; level::Int = 0)
+indent(level) = "  "
+
+function printTreeChild(buf::IOBuffer, child::Tree, cursor, term_width::Int; level::Int = 0)
+    cur = cursor == -1
     if child.expanded
-        cur ? print(buf, "[v] ") : print(buf, " v  ")
+        cur ? print(buf, "[▼] ") : print(buf, " ▼  ")
         # print Tree with additional nesting, but without an active cursor
         # init=true assures that the Tree printing doesn't mess with anything
-        printMenu(buf, child, 0; init=true, level = level + 1)
+        cursor = printMenu′(buf, child, cursor; init=true, level = level)
     else
-        cur ? print(buf, "[>] ") : print(buf, " >  ")
+        cur ? print(buf, "[▶] ") : print(buf, " ▶  ")
         # only print header
         print(buf, child.head)
     end
+
+    cursor
 end
 
-function writeChild(buf::IOBuffer, t::Tree, idx::Int, cur::Bool, term_width::Int; level::Int = 0)
+macro ishow(x)
+    :(ishow($(esc(x))))
+end
+
+function ishow(x)
+    t = if showmethod(typeof(x)) ≠ showmethod(Any)
+        b = IOBuffer()
+        print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), x)))
+        strs = split(String(take!(b)), '\n')
+        if length(strs) > 1
+            Tree(strs[1], [Text(join(strs[2:end], '\n'))])
+        else
+            Tree(strs[1], [])
+        end
+    else
+        defaultrepr(x)
+    end
+    request(t)
+end
+
+function writeChild(buf::IOBuffer, t::Tree, idx::Int, cursor, term_width::Int; level::Int = 0)
     tmpbuf = IOBuffer()
 
     child = t.children[idx]
 
+    cursor -= 1
+    cur = cursor == -1
     if child isa Tree
-        printTreeChild(tmpbuf, child, cur, term_width, level = level)
+        cursor = printTreeChild(tmpbuf, child, cursor, term_width, level = level)
     else
         # if there's a specially designed show method we fall back to that
         if showmethod(typeof(child)) ≠ showmethod(Any)
             cur ? print(buf, "[ ] ") : print(buf, "    ")
-            printIndent(tmpbuf, level)
-            print(tmpbuf, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)))
+            b = IOBuffer()
+            print(b, Text(io -> show(IOContext(io, limit = true), MIME"text/plain"(), child)))
+            s = join(split(String(take!(b)), '\n'), "\n"*indent(level))
+            print(tmpbuf, s)
         else
             d = defaultrepr(child)
             if d isa Tree
-                printTreeChild(tmpbuf, d, cur, term_width, level = level)
+                cursor = printTreeChild(tmpbuf, d, cursor, term_width, level = level)
             else
-                printIndent(tmpbuf, level)
-                print(tmpbuf, d)
+                b = IOBuffer()
+                print(b, d)
+                s = join(split(String(take!(b)), '\n'), "\n"*indent(level))
+                print(tmpbuf, s)
             end
         end
     end
-    print(buf, String(take!(tmpbuf)))
+
+    str = String(take!(tmpbuf))
+
+    str = join(split(str, '\n'), "\n"*indent(level))
+
+    print(buf, str)
+
+    cursor
 end
 
 
@@ -126,14 +176,14 @@ end
 
 # If `header()` is defined for a specific menu type, display the header
 #  above the menu when it is rendered to the screen.
-header(t::Tree) = t.head
+header(t::Tree) = ""
 
 # If `keypress()` is defined for a specific menu type, send any
 #   non-standard keypres event to this function. If the function returns
 #   true, `request()` will exit.
 keypress(m::AbstractMenu, i::UInt32) = false
 
-function printMenu(out, m::Tree, cursor::Int; init::Bool=false, level=0)
+function printMenu′(out, m::Tree, cursor; init::Bool=false, level=0)
     CONFIG[:supress_output] && return
 
     buf = IOBuffer()
@@ -146,25 +196,16 @@ function printMenu(out, m::Tree, cursor::Int; init::Bool=false, level=0)
         # clear display until end of screen
         print(buf, "\x1b[0J")
     end
-    print(buf, m.head)
-    for i in (m.pageoffset+1):(m.pageoffset + m.pagesize)
+
+    term_width = Base.Terminals.width(TerminalMenus.terminal)
+
+    # print header
+    println(buf, m.head)
+
+    for i in 1:length(m.children)
         print(buf, "\x1b[2K")
 
-        if i == m.pageoffset+1 && m.pageoffset > 0
-            # first line && scrolled past first entry
-            print(buf, CONFIG[:up_arrow])
-        elseif i == m.pagesize+m.pageoffset && i != length(options(m))
-            # last line && not last option
-            print(buf, CONFIG[:down_arrow])
-        else
-            # non special line
-            print(buf, " ")
-        end
-
-        term_width = Base.Terminals.width(TerminalMenus.terminal)
-
-
-        writeChild(buf, m, i, i == cursor, term_width, level=level)
+        cursor = writeChild(buf, m, i, cursor, term_width, level=level+1)
 
         # dont print an \r\n on the last line
         i != (m.pagesize+m.pageoffset) && print(buf, "\r\n")
@@ -175,4 +216,101 @@ function printMenu(out, m::Tree, cursor::Int; init::Bool=false, level=0)
     m.lastHeight = count(c -> c == '\n', str)
 
     print(out, str)
+    cursor
+end
+
+function findItem(t::Tree, cursor; )
+    i = nothing
+    for c in t.children
+        if cursor == 0
+            return c, cursor
+        end
+
+        cursor -= 1
+
+        if c isa Tree && c.expanded
+            i, cursor = findItem(c, cursor)
+        end
+
+        if i ≠ nothing
+            return i, cursor
+        end
+    end
+    return i, cursor
+end
+
+function request(term::Base.Terminals.TTYTerminal, m::Tree)
+    cursor = 0
+
+    menu_header = header(m)
+    if !CONFIG[:supress_output] && menu_header != ""
+        println(term.out_stream, menu_header)
+    end
+
+    printMenu′(term.out_stream, m, cursor, init=true)
+
+    raw_mode_enabled = enableRawMode(term)
+    raw_mode_enabled && print(term.out_stream, "\x1b[?25l") # hide the cursor
+    try
+        while true
+            c = readKey(term.in_stream)
+
+            currentItem, _ = findItem(m, cursor)
+
+            if c == Int(ARROW_UP)
+                if cursor > 0
+                    cursor -= 1
+                end
+            elseif c == Int(ARROW_DOWN)
+                cursor += 1
+            elseif c == 13 # <enter>
+                # will break if pick returns true
+                currentItem isa Tree && toggle(currentItem)
+            elseif c == UInt32('q')
+                cancel(m)
+                break
+            elseif c == 3 # ctrl-c
+                cancel(m)
+                if CONFIG[:ctrl_c_interrupt]
+                    throw(InterruptException())
+                else
+                    break
+                end
+            else
+                # will break if keypress returns true
+                keypress(m, c) && break
+            end
+
+            printMenu′(term.out_stream, m, cursor)
+        end
+    finally
+        # always disable raw mode even even if there is an
+        #  exception in the above loop
+        if raw_mode_enabled
+            print(term.out_stream, "\x1b[?25h") # unhide cursor
+            disableRawMode(term)
+        end
+    end
+    println(term.out_stream)
+
+    return m.selected
+end
+
+function toggleall(t::Tree, expand)
+    for child in t.children
+        if child isa Tree
+            child.expanded = expand
+            toggleall(child, expand)
+        end
+    end
+end
+
+
+function keypress(t::Tree, key::UInt32)
+    if key == UInt32('e') || key == UInt32('E')
+        toggleall(t, true)
+    elseif key == UInt32('c') || key == UInt32('C')
+        toggleall(t, false)
+    end
+    false # don't break
 end
